@@ -9,6 +9,7 @@
 
 #include <libfdt.h>
 #include <sbi/sbi_error.h>
+#include <sbi/sbi_console.h>
 #include <sbi_utils/fdt/fdt_helper.h>
 #include <sbi_utils/mailbox/fdt_mailbox.h>
 
@@ -117,6 +118,7 @@ int fdt_mailbox_request_chan(void *fdt, int nodeoff, int index,
 	if (rc)
 		return rc;
 
+	sbi_printf("Chan args: %u %u\n", chan_args[0], chan_args[1]);
 	chan = mbox_controller_request_chan(mbox, chan_args);
 	if (!chan)
 		return SBI_ENOENT;

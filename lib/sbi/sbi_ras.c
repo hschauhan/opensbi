@@ -7,6 +7,7 @@
 
 #include <sbi/sbi_error.h>
 #include <sbi/sbi_ras.h>
+#include <sbi/sbi_console.h>
 
 static const struct sbi_ras_agent *ras_agent = NULL;
 
@@ -31,19 +32,23 @@ int sbi_ras_probe(void)
 	return ras_agent->ras_probe();
 }
 
-int sbi_ras_sync_hart_errs(u32 *pending_vectors)
+int sbi_ras_sync_hart_errs(u32 *pending_vectors, u32 *nr_pending,
+			   u32 *nr_remaining)
 {
 	if (!ras_agent)
 		return SBI_EFAIL;
 
-	return ras_agent->ras_sync_hart_errs(pending_vectors);
+	return ras_agent->ras_sync_hart_errs(pending_vectors, nr_pending,
+					     nr_remaining);
 }
 
-int sbi_ras_sync_dev_errs(u32 *pending_vectors)
+int sbi_ras_sync_dev_errs(u32 *pending_vectors, u32 *nr_pending,
+			  u32 *nr_remaining)
 {
 	if (!ras_agent)
 		return SBI_EFAIL;
 
-	return ras_agent->ras_sync_dev_errs(pending_vectors);
+	return ras_agent->ras_sync_dev_errs(pending_vectors, nr_pending,
+					    nr_remaining);
 }
 

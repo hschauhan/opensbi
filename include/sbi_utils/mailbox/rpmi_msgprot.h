@@ -407,6 +407,7 @@ struct rpmi_ras_probe_req {
 };
 
 struct rpmi_ras_probe_resp {
+	s32 status;
 	u32 version;
 };
 

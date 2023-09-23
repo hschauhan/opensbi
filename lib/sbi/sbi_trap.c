@@ -23,6 +23,9 @@
 #include <sbi/sbi_scratch.h>
 #include <sbi/sbi_timer.h>
 #include <sbi/sbi_trap.h>
+#include <sbi_utils/mailbox/mailbox.h>
+#include <sbi_utils/mailbox/rpmi_mailbox.h>
+#include <sbi/sbi_ras.h>
 
 static void __noreturn sbi_trap_error(const char *msg, int rc,
 				      ulong mcause, ulong mtval, ulong mtval2,
@@ -204,11 +207,23 @@ volatile unsigned int *rec_stat_addr = (volatile unsigned int *)0x4000048;
 
 void sbi_ras_process(struct sbi_trap_regs *regs)
 {
-	sbi_printf("%s: Got RAS HP INT!!\n", __func__);
+	int rc;
+	u32 pending_vectors[MAX_PEND_VECS] = { 0xfffffffful };
+	u32 nr_pending, nr_remaining;
+
 	*(rec_ctrl_addr) = *(rec_ctrl_addr) | 0x4;
-	while (*rec_stat_addr & 1);
 	csr_clear(CSR_MIP, MIP_RASHP_INTP);
-	sbi_sse_inject_event(SBI_SSE_EVENT_LOCAL_RAS, regs);
+
+	rc = sbi_ras_sync_hart_errs(pending_vectors, &nr_pending, &nr_remaining);
+
+	if (rc) {
+		sbi_printf("Failed to synchronize errors from RAS agent\n");
+		return;
+	}
+
+	sbi_sse_inject_event(0, regs);
+
+	return;
 }
 
 static int sbi_trap_nonaia_irq(struct sbi_trap_regs *regs, ulong mcause)

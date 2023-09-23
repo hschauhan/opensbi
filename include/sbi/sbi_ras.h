@@ -19,15 +19,19 @@ struct sbi_ras_agent {
 	int (*ras_probe)(void);
 
 	/** synchronize CPU errors */
-	int (*ras_sync_hart_errs)(u32 *pending_vectors);
+	int (*ras_sync_hart_errs)(u32 *pending_vectors, u32 *nr_pending,
+				  u32 *nr_remaining);
 
 	/** synchronize device errors */
-	int (*ras_sync_dev_errs)(u32 *pending_vectors);
+	int (*ras_sync_dev_errs)(u32 *pending_vectors, u32 *nr_pending,
+				 u32 *nr_remaining);
 };
 
 int sbi_ras_probe(void);
-int sbi_ras_sync_hart_errs(u32 *pending_vectors);
-int sbi_ras_sync_dev_errs(u32 *pending_vectors);
+int sbi_ras_sync_hart_errs(u32 *pending_vectors, u32 *nr_pending,
+			   u32 *nr_remaining);
+int sbi_ras_sync_dev_errs(u32 *pending_vectors, u32 *nr_pending,
+			  u32 *nr_remaining);
 
 const struct sbi_ras_agent *sbi_ras_get_agent(void);
 void sbi_ras_set_agent(const struct sbi_ras_agent *agent);

@@ -12,6 +12,7 @@
 #include <sbi/sbi_ras.h>
 #include <sbi/sbi_ecall_interface.h>
 #include <sbi/sbi_scratch.h>
+#include <sbi/sbi_console.h>
 #include <sbi_utils/ras/fdt_ras.h>
 #include <sbi_utils/fdt/fdt_helper.h>
 #include <sbi_utils/mailbox/fdt_mailbox.h>
@@ -21,39 +22,60 @@ struct rpmi_ras {
 	struct mbox_chan *chan;
 };
 
-static unsigned long rpmi_ras_offset;
+static struct rpmi_ras ras;
 
-static struct rpmi_ras *rpmi_ras_get_pointer(u32 hartid)
-{
-	struct sbi_scratch *scratch;
-
-	scratch = sbi_hartid_to_scratch(hartid);
-	if (!scratch || !rpmi_ras_offset)
-		return NULL;
-
-	return sbi_scratch_offset_ptr(scratch, rpmi_ras_offset);
-}
-
-static int rpmi_ras_sync_hart_errs(u32 *pending_vectors)
+static int rpmi_ras_sync_hart_errs(u32 *pending_vectors, u32 *nr_pending,
+				   u32 *nr_remaining)
 {
 	int rc = SBI_SUCCESS;
 	struct rpmi_ras_sync_hart_err_req req;
 	struct rpmi_ras_sync_err_resp resp;
-	struct rpmi_ras *ras;
+
+	if (!pending_vectors || !nr_pending || !nr_remaining)
+		return SBI_ERR_INVALID_PARAM;
+
+	*nr_pending = *nr_remaining = 0;
+
+	if (!ras.chan)
+		return SBI_ERR_INVALID_STATE;
 
 	req.hart_id = current_hartid();
 
-	ras = rpmi_ras_get_pointer(req.hart_id);
+	rc = rpmi_normal_request_with_status(ras.chan,
+					     RPMI_RAS_SRV_SYNC_HART_ERR_REQ,
+					     &req, rpmi_u32_count(req),
+					     rpmi_u32_count(req),
+					     &resp, rpmi_u32_count(resp),
+					     rpmi_u32_count(resp));
 
-	rc = rpmi_normal_request_with_status(
-			ras->chan, RPMI_RAS_SRV_SYNC_HART_ERR_REQ,
-			&req, rpmi_u32_count(req), rpmi_u32_count(req),
-			&resp, rpmi_u32_count(resp), rpmi_u32_count(resp));
+	if (rc) {
+		sbi_printf("%s: sync failed, rc: 0x%x\n", __func__, rc);
+		return rc;
+	}
 
-	return rc;
+	if (!resp.status && resp.returned > 0 && resp.returned < MAX_PEND_VECS) {
+		memcpy(pending_vectors, resp.pending_vecs,
+		       resp.returned * sizeof(u32));
+		*nr_pending = resp.returned;
+		*nr_remaining = resp.remaining;
+	} else {
+		if (resp.status) {
+			sbi_printf("%s: sync returned status %d\n",
+				   __func__, resp.status);
+		}
+
+		if (resp.returned < 0 || resp.returned > MAX_PEND_VECS)
+			sbi_printf("%s: invalid vector range returned %u\n",
+				   __func__, resp.returned);
+
+		return SBI_ERR_FAILED;
+	}
+
+	return SBI_SUCCESS;
 }
 
-static int rpmi_ras_sync_dev_errs(u32 *pending_vectors)
+static int rpmi_ras_sync_dev_errs(u32 *pending_vectors, u32 *nr_pending,
+				  u32 *nr_remaining)
 {
 	int rc = SBI_SUCCESS;
 
@@ -63,22 +85,25 @@ static int rpmi_ras_sync_dev_errs(u32 *pending_vectors)
 static int rpmi_ras_probe(void)
 {
 	int rc;
-	struct rpmi_ras *ras;
 	struct rpmi_ras_probe_resp resp;
 	struct rpmi_ras_probe_req req;
-	u32 hart_id = current_hartid();
 
-	ras = rpmi_ras_get_pointer(hart_id);
-	if (!ras)
-		return SBI_ENOSYS;
+	if (!ras.chan)
+		return SBI_ERR_INVALID_STATE;
+
+	sbi_printf("%s: sending probe to RAS agent. (Msg: %d Chan: %p)\n",
+		   __func__, RPMI_RAS_SRV_PROBE_REQ, ras.chan);
 
 	rc = rpmi_normal_request_with_status(
-			ras->chan, RPMI_RAS_SRV_PROBE_REQ,
+			ras.chan, RPMI_RAS_SRV_PROBE_REQ,
 			&req, rpmi_u32_count(req), rpmi_u32_count(req),
 			&resp, rpmi_u32_count(resp), rpmi_u32_count(resp));
-	if (rc)
+	if (rc) {
+		sbi_printf("%s: error getting response from RAS probe. rc: %x\n", __func__, rc);
 		return rc;
+	}
 
+	sbi_printf("%s: RAS Agent Version: %d\n", __func__, resp.version);
 	return 0;
 }
 
@@ -93,24 +118,22 @@ static int rpmi_ras_cold_init(void *fdt, int nodeoff,
 			      const struct fdt_match *match)
 {
 	int rc;
-	struct mbox_chan *chan;
 
-	if (!rpmi_ras_offset) {
-		rpmi_ras_offset =
-			sbi_scratch_alloc_type_offset(struct rpmi_ras);
-		if (!rpmi_ras_offset)
-			return SBI_ENOMEM;
-	}
+	if (ras.chan)
+		return 0;
 
 	/*
 	 * If channel request failed then other end does not support
 	 * RAS service group so do nothing.
 	 */
-	rc = fdt_mailbox_request_chan(fdt, nodeoff, 0, &chan);
+	rc = fdt_mailbox_request_chan(fdt, nodeoff, 0, &ras.chan);
 	if (rc)
-		return 0;
+		return rc;
 
+	sbi_printf("%s: RAS Chan %p\n", __func__, ras.chan);
 	sbi_ras_set_agent(&sbi_rpmi_ras_agent);
+
+	sbi_ras_probe();
 
 	return 0;
 }

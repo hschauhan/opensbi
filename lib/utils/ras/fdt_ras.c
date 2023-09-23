@@ -8,6 +8,7 @@
  */
 
 #include <sbi/sbi_error.h>
+#include <sbi/sbi_console.h>
 #include <sbi_utils/fdt/fdt_helper.h>
 #include <sbi_utils/ras/fdt_ras.h>
 
@@ -44,8 +45,10 @@ static int fdt_ras_cold_init(void)
 		while ((noff = fdt_find_match(fdt, noff,
 					drv->match_table, &match)) >= 0) {
 			/* drv->cold_init must not be NULL */
-			if (drv->cold_init == NULL)
+			if (drv->cold_init == NULL) {
+				sbi_printf("%s: But no cold init function\n", __func__);
 				return SBI_EFAIL;
+			}
 
 			rc = drv->cold_init(fdt, noff, match);
 			if (rc == SBI_ENODEV)
@@ -53,6 +56,7 @@ static int fdt_ras_cold_init(void)
 			if (rc)
 				return rc;
 			current_driver = drv;
+			break;
 		}
 	}
 
