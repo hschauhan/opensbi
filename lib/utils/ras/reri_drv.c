@@ -14,6 +14,7 @@
 #include <sbi/sbi_ras.h>
 #include <sbi/sbi_ecall_interface.h>
 #include <sbi/sbi_scratch.h>
+#include <sbi/sbi_heap.h>
 #include <sbi/sbi_console.h>
 #include <sbi_utils/fdt/fdt_helper.h>
 #include <sbi_utils/ras/riscv_reri_regs.h>
@@ -21,32 +22,29 @@
 #include <sbi_utils/ras/ghes.h>
 #include <sbi_utils/ras/reri_drv.h>
 
-union reri_device {
-	struct reri_device_dram {
-		uint64_t addr;
-		uint64_t size;
-		uint32_t sse_vector;
-		uint16_t src_id;
-	} dram;
-
-	struct reri_device_hart {
-		uint64_t addr;
-		uint64_t size;
-		uint32_t sse_vector; /* Start of sse vectors */
-		uint32_t max_harts;
-		uint16_t src_id;
-	} harts;
+struct reri_generic_dev {
+	uint64_t addr;
+	uint64_t size;
+	uint32_t sse_vector;
+	uint16_t src_id;
+	uint16_t res;
 };
 
-#define RERI_DEV_DRAM		0
-#define RERI_DEV_HART		1
-#define MAX_RERI_DEVICES	2
+typedef struct reri_generic_dev reri_dram_dev_t;
 
-static union reri_device reri_devices[MAX_RERI_DEVICES];
+typedef struct reri_hart_dev {
+	struct reri_generic_dev dev;
+	int hart_id;
+} reri_hart_dev_t;
+
+static reri_hart_dev_t *reri_hart_devices = NULL;
+static reri_dram_dev_t reri_dram_dev;
+static uint32_t reri_nr_harts = 0;
 
 #define RERI_HART_COMPAT	"riscv,reri-harts"
 #define RERI_DRAM_COMPAT	"riscv,reri-dram"
 #define APEI_MEM_COMPAT		"riscv,apei-mem"
+#define RERI_ERR_BANK_SIZE	0x1000
 
 static uint64_t riscv_reri_dev_read_u64(void *dev_addr)
 {
@@ -70,46 +68,64 @@ static void riscv_reri_clear_valid_bit(void *control_addr)
 	riscv_reri_dev_write_u64(control_addr, control);
 }
 
+static reri_hart_dev_t *get_reri_hart_dev(int hart_id)
+{
+		int i;
+
+	for (i = 0; i < reri_nr_harts; i++) {
+		if (reri_hart_devices[i].hart_id == hart_id) {
+			return &reri_hart_devices[i];
+		}
+	}
+
+	return NULL;
+}
+
 static int riscv_reri_get_hart_addr(int hart_id, uint64_t *hart_addr,
 				    uint64_t *size)
 {
-	uint64_t baddr, sz;
+	reri_hart_dev_t *reri_hart;
 
-	baddr = reri_devices[RERI_DEV_HART].harts.addr;
-	sz = reri_devices[RERI_DEV_HART].harts.size;
-	baddr = hart_id * sz + baddr;
-	*hart_addr = baddr;
+	reri_hart = get_reri_hart_dev(hart_id);
+	if (!reri_hart)
+		return SBI_ENOENT;
 
-	return 0;
+	*hart_addr = reri_hart->dev.addr;
+	*size = reri_hart->dev.size;
+
+	return SBI_SUCCESS;
 }
 
 static uint32_t riscv_reri_get_hart_sse_vector(int hart_id)
 {
-	uint32_t start_vec;
+	reri_hart_dev_t *reri_hart;
 
 	if (hart_id > 0)
-		return -1;
+		return SBI_EINVAL;
 
-	start_vec = reri_devices[RERI_DEV_HART].harts.sse_vector;
+	reri_hart = get_reri_hart_dev(hart_id);
+	if (!reri_hart)
+		return SBI_ENOENT;
 
-	return start_vec + hart_id;
+	return reri_hart->dev.sse_vector;
 }
 
 static int fdt_parse_reri_device(const void *fdt, int nodeoff)
 {
 	int ret = SBI_SUCCESS;
 	uint64_t addr, size;
-	const fdt32_t *sse_vec_p, *max_harts_p, *src_id_p;
-	uint32_t sse_vec, max_harts;
+	const fdt32_t *sse_vec_p, *src_id_p, *target_harts_p, *hart_id_p;
+	const char *cpu_status;
+	uint32_t sse_vec;
 	uint16_t src_id;
-	int len, i;
+	int len, i, nr_harts, hart_phandle, cpu_offset;
 
 	if ((ret = fdt_node_check_compatible(fdt, nodeoff,
 					     RERI_DRAM_COMPAT)) == 0) {
 		if ((ret = fdt_get_node_addr_size(fdt, nodeoff, 0, &addr,
 						  &size)) == 0) {
-			reri_devices[RERI_DEV_DRAM].dram.addr = addr;
-			reri_devices[RERI_DEV_DRAM].dram.size = size;
+			reri_dram_dev.addr = addr;
+			reri_dram_dev.size = size;
 		} else {
 			goto _err_out;
 		}
@@ -119,51 +135,78 @@ static int fdt_parse_reri_device(const void *fdt, int nodeoff)
 			return SBI_ENOENT;
 
 		sse_vec = fdt32_to_cpu(*sse_vec_p);
-		reri_devices[RERI_DEV_DRAM].dram.sse_vector = sse_vec;
+		reri_dram_dev.sse_vector = sse_vec;
 
 		src_id_p = fdt_getprop(fdt, nodeoff, "source-id", &len);
 		if (!src_id_p)
 			return SBI_ENOENT;
 
 		src_id = fdt32_to_cpu(*src_id_p);
-		reri_devices[RERI_DEV_DRAM].dram.src_id = src_id;
+		reri_dram_dev.src_id = src_id;
+
 		if ((ret = acpi_ghes_new_error_source(src_id, sse_vec)) < 0) {
 			sbi_printf("Failed to create new DRAM error source\n");
 			return ret;
 		}
 	} else if ((ret = fdt_node_check_compatible(fdt, nodeoff,
 						    RERI_HART_COMPAT)) == 0) {
-		if ((ret = fdt_get_node_addr_size(fdt, nodeoff, 0, &addr,
-						  &size)) == 0) {
-			reri_devices[RERI_DEV_HART].harts.addr = addr;
-			reri_devices[RERI_DEV_HART].harts.size = size;
-		} else {
-			goto _err_out;
-		}
+		ret = fdt_get_node_addr_size(fdt, nodeoff, 0, &addr, &size);
+		if (ret < 0)
+			return SBI_ENOENT;
 
 		sse_vec_p = fdt_getprop(fdt, nodeoff, "sse-vector", &len);
 		if (!sse_vec_p)
 			return SBI_ENOENT;
 
 		sse_vec = fdt32_to_cpu(*sse_vec_p);
-		reri_devices[RERI_DEV_HART].harts.sse_vector = sse_vec;
-
-		max_harts_p = fdt_getprop(fdt, nodeoff, "max-harts", &len);
-		if (!max_harts_p)
-			return SBI_ENOENT;
-
-		max_harts = fdt32_to_cpu(*max_harts_p);
-		reri_devices[RERI_DEV_HART].harts.max_harts = max_harts;
 
 		src_id_p = fdt_getprop(fdt, nodeoff, "source-id", &len);
 		if (!src_id_p)
 			return SBI_ENOENT;
 
 		src_id = fdt32_to_cpu(*src_id_p);
-		reri_devices[RERI_DEV_HART].harts.src_id = src_id;
-		for (i = 0; i < max_harts; i++) {
-			if ((ret = acpi_ghes_new_error_source(src_id + i, sse_vec+i)) < 0)
-				return ret;
+
+		target_harts_p = fdt_getprop(fdt, nodeoff, "target-harts", &len);
+		if (target_harts_p && len >= sizeof(fdt32_t)) {
+			reri_nr_harts = nr_harts = len / sizeof(fdt32_t);
+			reri_hart_devices = (reri_hart_dev_t *)sbi_malloc(sizeof(reri_hart_dev_t)
+									  * nr_harts);
+			if (!reri_hart_devices)
+				return SBI_ENOMEM;
+
+			memset(reri_hart_devices, 0, sizeof(reri_hart_dev_t) * nr_harts);
+
+			for (i = 0; i < nr_harts; i++) {
+				reri_hart_devices[i].hart_id = -1; /* set of invalid */
+
+				hart_phandle = fdt32_to_cpu(target_harts_p[i]);
+
+				cpu_offset = fdt_node_offset_by_phandle(fdt, hart_phandle);
+				if (cpu_offset < 0)
+					return SBI_ENOENT;
+
+				cpu_status = fdt_getprop(fdt, cpu_offset, "status", &len);
+				if (!cpu_status)
+					continue;
+
+				if (strncmp(cpu_status, "disable", strlen("disable") == 0))
+					continue;
+
+				hart_id_p = fdt_getprop(fdt, cpu_offset, "reg", &len);
+				if (!hart_id_p)
+					continue;
+
+				if ((ret = acpi_ghes_new_error_source(src_id, sse_vec)) < 0)
+					continue;
+
+				reri_hart_devices[i].dev.addr = (addr + (i * RERI_ERR_BANK_SIZE));
+				reri_hart_devices[i].dev.size = RERI_ERR_BANK_SIZE;
+				reri_hart_devices[i].dev.sse_vector = sse_vec++;
+				reri_hart_devices[i].dev.src_id = src_id++;
+				reri_hart_devices[i].hart_id = fdt32_to_cpu(*hart_id_p);
+			}
+		} else {
+			return SBI_ENOENT;
 		}
 	}
 
